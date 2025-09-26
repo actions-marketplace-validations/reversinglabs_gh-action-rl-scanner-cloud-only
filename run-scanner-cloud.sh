@@ -1,5 +1,63 @@
 #! /bin/bash
 
+# PARAMS: passed via the environment
+#
+# RL_VERBOSE: a optional bool (default false)
+#
+# MY_ARTIFACT_TO_SCAN_PATH: a file path
+# REPORT_PATH: a optional directory path
+#
+# RL_PORTAL_SERVER: a server name (can be dns)
+# RL_PORTAL_ORG: a org name
+# RL_PORTAL_GROUP: a group name
+#
+# RL_PACKAGE_URL: a optional purl string (default: "") # may contain @ or /
+# RL_DIFF_WITH: a optional purl string (default "") # may contain @ or /
+# RL_SUBMIT_ONLY: a optional bool
+# RL_TIMEOUT: a optional int
+#
+# RLSECURE_PROXY_SERVER: a optional string (default "") # server dns or ip
+# RLSECURE_PROXY_PORT: a optional string (default "") # numeric
+# RLSECURE_PROXY_USER: a optional string (default "")
+# RLSECURE_PROXY_PASSWORD: a optional string (default "") could contain special chars
+
+cleanup()
+{
+    # suspicious chars are mainly `$><|&;
+
+    # for bool we can remove `$><|;&
+    RL_VERBOSE=${RL_VERBOSE//[\`\$><|;&]/}
+    RL_SUBMIT_ONLY=${RL_SUBMIT_ONLY//[\`\$><|;&]/}
+
+    # file or dir paths may not have `$><|;& so remove
+    REPORT_PATH=${REPORT_PATH//[\`\$><|;&]/}
+    MY_ARTIFACT_TO_SCAN_PATH=${MY_ARTIFACT_TO_SCAN_PATH//[\`\$><|;&]/}
+
+    # portal remove the usual suspects
+    RL_PORTAL_SERVER=${RL_PORTAL_SERVER//[\`\$><|;&]/}
+    RL_PORTAL_ORG=${RL_PORTAL_ORG//[\`\$><|;&]/}
+    RL_PORTAL_GROUP=${RL_PORTAL_GROUP//[\`\$><|;&]/}
+
+    # purl (name and version) may not have ` so remove
+    RL_PACKAGE_URL=${RL_PACKAGE_URL//[\`]/}
+    RL_DIFF_WITH=${RL_DIFF_WITH//[\`]/}
+
+    RL_TIMEOUT=${RL_TIMEOUT//[^0-9]/} # remove all non numeric
+
+    # the proxy params are passed explicitly via the environment
+    # a server is either ip4 or ip6 or dns; safe to remove $`><|;&
+    RLSECURE_PROXY_SERVER=${RLSECURE_PROXY_SERVER//[\`\$><|;&]/}
+
+    # a port is always numeric, remove all other chars
+    RLSECURE_PROXY_PORT=${RLSECURE_PROXY_PORT//[^0-9]/}
+
+    # a user may not contain: `$><|&;
+    RLSECURE_PROXY_USER=${RLSECURE_PROXY_USER//[\`\$><|;&]/}
+
+    # a pass is more difficult as it can contain almost anything
+    # in this case we can export it and forward it to docker via the environment
+}
+
 convert_int_may_fail()
 {
     # make sure we have a inner command that can fail
@@ -118,6 +176,7 @@ validate_mandatory_params()
         echo "::error FATAL: no 'RLPORTAL_ACCESS_TOKEN' is set in your environment"
         exit 101
     fi
+    export RLPORTAL_ACCESS_TOKEN
 }
 
 prep_report()
@@ -178,22 +237,26 @@ prep_proxy_data()
 
     if [ ! -z "${RLSECURE_PROXY_SERVER}" ]
     then
-        PROXY_DATA="${PROXY_DATA} -e RLSECURE_PROXY_SERVER=${RLSECURE_PROXY_SERVER}"
+        export RLSECURE_PROXY_SERVER
+        PROXY_DATA="${PROXY_DATA} -e RLSECURE_PROXY_SERVER"
     fi
 
     if [ ! -z "${RLSECURE_PROXY_PORT}" ]
     then
-        PROXY_DATA="${PROXY_DATA} -e RLSECURE_PROXY_PORT=${RLSECURE_PROXY_PORT}"
+        export RLSECURE_PROXY_PORT
+        PROXY_DATA="${PROXY_DATA} -e RLSECURE_PROXY_PORT"
     fi
 
     if [ ! -z "${RLSECURE_PROXY_USER}" ]
     then
-        PROXY_DATA="${PROXY_DATA} -e RLSECURE_PROXY_USER=${RLSECURE_PROXY_USER}"
+        export RLSECURE_PROXY_USER
+        PROXY_DATA="${PROXY_DATA} -e RLSECURE_PROXY_USER"
     fi
 
     if [ ! -z "${RLSECURE_PROXY_PASSWORD}" ]
     then
-        PROXY_DATA="${PROXY_DATA} -e RLSECURE_PROXY_PASSWORD=${RLSECURE_PROXY_PASSWORD}"
+        export RLSECURE_PROXY_PASSWORD
+        PROXY_DATA="${PROXY_DATA} -e RLSECURE_PROXY_PASSWORD"
     fi
 }
 
@@ -203,7 +266,7 @@ optional_timeout_and_submit()
 
     if [ ! -z "${RL_TIMEOUT}" ]
     then
-        # we will not handle ant min, max or default here,
+        # we will not handle any min, max or default here,
         # those can change based on rl-scanner-cloud
 
         # only if integer
@@ -250,7 +313,7 @@ scan_with_portal()
     fi
 
     docker run --rm -u $(id -u):$(id -g) \
-        -e "RLPORTAL_ACCESS_TOKEN=${RLPORTAL_ACCESS_TOKEN}" \
+        -e "RLPORTAL_ACCESS_TOKEN" \
         ${PROXY_DATA} \
         -v "${A_DIR}/:/packages:ro" ${REPORT_VOLUME} \
         reversinglabs/rl-scanner-cloud:latest \
@@ -263,7 +326,7 @@ scan_with_portal()
                 --replace \
                 --force \
                 ${OPTIONAL_TS} ${DIFF_WITH} ${WITH_REPORT} 1>1 2>2
-    RR=$?
+    RR=$? # memorize the exit code for later
 
     # TODO: is there a 'Scan result' string ?
     STATUS=$( grep 'Scan result:' 1 )
@@ -282,7 +345,7 @@ showStdOutErr()
 
 test_missing_status()
 {
-    [ -z "$STATUS" ] && {
+    [ -z "${STATUS}" ] && {
         showStdOutErr
 
         msg="Fatal: cannot find the scan result in the output"
@@ -297,22 +360,24 @@ test_missing_status()
 
 set_status_PassFail()
 {
-    echo "description=$STATUS" >> $GITHUB_OUTPUT
-    echo "$STATUS"             >> $GITHUB_STEP_SUMMARY
+    echo "description=${STATUS}" >> $GITHUB_OUTPUT
+    echo "${STATUS}"             >> $GITHUB_STEP_SUMMARY
 
-    echo "$STATUS" | grep -q FAIL
+    echo "${STATUS}" | grep -q FAIL
     if [ "$?" == "0" ]
     then
         echo "status=failure" >> $GITHUB_OUTPUT
-        echo "::error::$STATUS"
+        echo "::error::${STATUS}"
     else
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "::notice::$STATUS"
+        echo "::notice::${STATUS}"
     fi
 }
 
 main()
 {
+    cleanup
+
     if [ "${RL_VERBOSE}" != "false" ]
     then
         do_verbose
@@ -338,4 +403,4 @@ main()
     exit ${RR}
 }
 
-main $@
+main "$@"
